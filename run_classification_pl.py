@@ -12,10 +12,11 @@ import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 from transformers import AdamW
-from torch.utils.data import Dataset, DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset
 from rasa.nlu.training_data.loading import load_data
 from sklearn.model_selection import train_test_split
 from torchnlp.random import set_seed
+from filelock import FileLock
 
 
 flags.DEFINE_boolean('debug', False, '')
@@ -193,7 +194,12 @@ class NluClassifier(pl.LightningModule):
         return {**out, 'log': out}
 
     def train_dataloader(self):
-        nlu_train_set = torch.load(os.path.join(FLAGS.cache_dir, 'train.set'))
+        trainset_path = os.path.join(FLAGS.cache_dir, 'train.set')
+        trainset_lock_path = trainset_path + '.lock'
+        
+        with FileLock(trainset_lock_path):
+            nlu_train_set = torch.load(trainset_path)
+
         return DataLoader(
             nlu_train_set,
             batch_size=FLAGS.batch_size,
@@ -202,7 +208,12 @@ class NluClassifier(pl.LightningModule):
         )
 
     def val_dataloader(self):
-        nlu_valid_set = torch.load(os.path.join(FLAGS.cache_dir, 'valid.set'))
+        validset_path = os.path.join(FLAGS.cache_dir, 'valid.set')
+        validset_lock_path = validset_path + '.lock'
+        
+        with FileLock(validset_lock_path):
+            nlu_valid_set = torch.load(validset_path)
+
         return DataLoader(
             nlu_valid_set,
             batch_size=FLAGS.batch_size,
@@ -230,8 +241,16 @@ def read_nlu_data():
     try:
         cache_dir = sh.ls(FLAGS.cache_dir)
         if 'id2class.set' in cache_dir and 'intent_examples.set' in cache_dir:
-            id2class = torch.load(os.path.join(FLAGS.cache_dir, 'id2class.set'))
-            intent_examples = torch.load(os.path.join(FLAGS.cache_dir, 'intent_examples.set'))
+            id2class_path = os.path.join(FLAGS.cache_dir, 'id2class.set')
+            id2class_lock_path = id2class_path + '.lock'
+            intent_examples_path = os.path.join(FLAGS.cache_dir, 'intent_examples.set')
+            intent_examples_lock_path = intent_examples_path + '.lock'
+            
+            with FileLock(id2class_lock_path):
+                id2class = torch.load(id2class_path)
+
+            with FileLock(intent_examples_lock_path):
+                intent_examples = torch.load(intent_examples_path)
 
             return id2class, intent_examples
     except Exception as e:
