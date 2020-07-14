@@ -21,7 +21,7 @@ from torchnlp.random import set_seed
 from filelock import FileLock
 
 
-flags.DEFINE_boolean('debug', True, '')
+flags.DEFINE_boolean('debug', False, '')
 flags.DEFINE_boolean('do_train', True, '')
 flags.DEFINE_boolean('do_predict', False, '')
 
@@ -196,14 +196,54 @@ class NerClassifier(pl.LightningModule):
             inputs = {"input_ids": input_ids, "attention_mask": attention_masks}
             outputs = self(**inputs)
 
+        pred_lists = self._predict_outputs(outputs)
+        result = []
+
+        for t, tags in zip(text, pred_lists):
+            result.append(self._result_to_json(t, tags[1: len(t) + 1]))
+        
+        return result
+    
+    def _predict_outputs(self, outputs):
         preds = np.argmax(outputs[0], axis=2)
-        pred_lists = []
+        preds_list = [[] for _ in range(preds.shape[0])]
+        for i in range(preds.shape[0]):
+            for j in range(preds.shape[1]):
+                preds_list[i].append(self.id2entity[preds[i][j].item()])
+        return preds_list
 
-        for item in preds[0]:
-            pred_lists.append(self.id2entity[item.item()])
+    @staticmethod
+    def _result_to_json(string, tags):
+        item = {
+            "string": string,
+            "entities": []
+        }
+        entity_name = ""
+        entity_start = 0
+        idx = 0
 
-        # TODO 由于婚假原因，等后面再补充这块内容
-        return pred_lists
+        for char, tag in zip(string, tags):
+            if tag[0] == "S":
+                item["entities"].append(
+                    {"value": char, "start": idx, "end": idx+1, "entity": tag[2:]})
+            elif tag[0] == "B":
+                entity_name += char
+                entity_start = idx
+            elif tag[0] == "I":
+                entity_name += char
+            elif tag[0] == "E":
+                entity_name += char
+                item["entities"].append(
+                    {"value": entity_name,
+                    "start": entity_start,
+                    "end": idx + 1,
+                    "entity": tag[2:]})
+                entity_name = ""
+            else:
+                entity_name = ""
+                entity_start = idx
+            idx += 1
+        return item 
 
     @staticmethod
     def _convert_text_to_ids(tokenizer, text):
@@ -396,10 +436,10 @@ def main(argv):
         model.eval()
         model.freeze()
 
-        texts = ["我去青海休婚假了"]
-
-        prediction = model.predict(texts)
-
+        while True:
+            text = input("输入：")
+            prediction = model.predict([text])
+            print("ner的结果是："prediction)
 
 if __name__ == "__main__":
     app.run(main)
