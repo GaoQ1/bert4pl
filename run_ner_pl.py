@@ -439,7 +439,7 @@ def main(argv):
         while True:
             text = input("输入：")
             prediction = model.predict([text])
-            print("ner的结果是："prediction)
+            print("ner的结果是：", prediction)
 
 if __name__ == "__main__":
     app.run(main)
