@@ -1,6 +1,7 @@
 # BERT for Python-Lightning
 ## BERT for Python-Lightning
 - [优雅の使用transformer系列之text-classification](https://www.jianshu.com/p/37346c8873bb)
+- [优雅の使用transformer系列之gpt2-chitchat](https://www.jianshu.com/p/2b82105acb90)
 
 ## Introduction
 这个repo会持续放基于transformer和pytorch-lightning的一些功能实现，也欢迎大家contribute.
@@ -46,16 +47,6 @@ python run_ner_pl.py --do_train=False --do_predict=True
 ```
 
 ## Run_GPT2_Chitchat
-### train model
-```
-cd gpt2-chichat-pl
-python train.py
-```
-
-### run model and provide a service
-```
-python run_interact.py --train_mmi=True
-python run_interact.py --train_mmi=False
-```
+具体的可以参考[优雅の使用transformer系列之gpt2-chitchat](https://www.jianshu.com/p/2b82105acb90)这篇文章
 
 ## 未完待续...

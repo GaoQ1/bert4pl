@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 flags.DEFINE_boolean('debug', False, '')
 flags.DEFINE_boolean('train_mmi', False, '是否是训练mmi模型')
-flags.DEFINE_boolean('use_pretrain', True, '是否使用预训练模型')
+flags.DEFINE_boolean('use_pretrain', False, '是否使用预训练模型')
 
 flags.DEFINE_integer('seed', 0, '')
 flags.DEFINE_integer('epochs', 20, '')
