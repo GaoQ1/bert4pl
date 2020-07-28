@@ -10,17 +10,26 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
-from transformers import AdamW, set_seed
 from torch.utils.data import DataLoader, TensorDataset
 from rasa.nlu.training_data.loading import load_data
 from sklearn.model_selection import train_test_split
 from filelock import FileLock
 
 
+from transformers import BertConfig, BertTokenizer
+from transformers import AdamW, get_linear_schedule_with_warmup
+from transformers import set_seed
+
+
+from bert_of_theseus import BertForSequenceClassification
+from bert_of_theseus.replacement_scheduler import ConstantReplacementScheduler, LinearReplacementScheduler
+
+MODEL_CLASSES = {
+    'bert': (BertConfig, BertForSequenceClassification, BertTokenizer),
+}
+
 flags.DEFINE_boolean('debug', False, '')
 flags.DEFINE_boolean('do_train', True, '')
-flags.DEFINE_boolean('do_predict', False, '')
 
 flags.DEFINE_integer('seed', 0, '')
 flags.DEFINE_integer('epochs', 20, '')
@@ -30,15 +39,23 @@ flags.DEFINE_integer('max_seq_length', 256, '')
 flags.DEFINE_integer('intent_ranking_length', 5, '')
 flags.DEFINE_integer('gpus', 1, '')
 flags.DEFINE_integer('patience', 3, '')
+flags.DEFINE_integer('gradient_accumulation_steps', 1, 'Number of updates steps to accumulate before performing a backward/update pass.')
+flags.DEFINE_integer('steps_for_replacing', 0, 'Steps before entering successor fine_tuning (only useful for constant replacing)')
 
 flags.DEFINE_float('learning_rate', 1e-5, '')
 flags.DEFINE_float('weight_decay', 1e-2, '')
 flags.DEFINE_float('adam_epsilon', 1e-8, '')
 
+flags.DEFINE_float('replacing_rate', 0.3, '')
+flags.DEFINE_float('scheduler_linear_k', 0, 'Linear k for replacement scheduler.')
+
 flags.DEFINE_string('monitor', 'val_loss', '')
 flags.DEFINE_string('metric_mode', 'min', '')
-
 flags.DEFINE_string('model_name_or_path', 'bert-base-chinese', '')
+
+flags.DEFINE_string('model_type', 'bert', '')
+flags.DEFINE_string('scheduler_type', 'none', 'choice from [none, linear]')
+
 flags.DEFINE_string('data_dir', os.path.join(os.getcwd(), 'data'), '')
 flags.DEFINE_string('output_dir', os.path.join(os.getcwd(), 'output'), '')
 flags.DEFINE_string('cache_dir', os.path.join(os.getcwd(), 'cache'), '')
@@ -48,28 +65,32 @@ FLAGS = flags.FLAGS
 sh.rm('-r', '-f', 'logs')
 sh.mkdir('logs')
 
-class NluClassifier(pl.LightningModule):
+class NluTheseusClassifier(pl.LightningModule):
     def __init__(self, id2class=None, intent_examples=None):
         super().__init__()
         self.id2class = id2class
         self.class2id = {j: i for i, j in self.id2class.items()}
         self.intent_examples = intent_examples
 
-        self.config = AutoConfig.from_pretrained(
-            FLAGS.model_name_or_path,
-            num_labels=len(id2class)
-        )
+        config_class, model_class, tokenizer_class = MODEL_CLASSES[FLAGS.model_type]
+        
+        self.config = config_class.from_pretrained(FLAGS.model_name_or_path, num_labels=len(id2class))
+        self.config.output_hidden_states = True
+        
+        self.tokenizer = tokenizer_class.from_pretrained(FLAGS.model_name_or_path)
+        
+        self.model = model_class.from_pretrained(FLAGS.model_name_or_path, config=self.config)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            FLAGS.model_name_or_path
-        )
+        # Replace rate scheduler
+        if FLAGS.scheduler_type == 'none':
+            self.replacing_rate_scheduler = ConstantReplacementScheduler(bert_encoder=self.model.bert.encoder,
+                                                                    replacing_rate=FLAGS.replacing_rate,
+                                                                    replacing_steps=FLAGS.steps_for_replacing)
+        elif FLAGS.scheduler_type == 'linear':
+            self.replacing_rate_scheduler = LinearReplacementScheduler(bert_encoder=self.model.bert.encoder,
+                                                                base_replacing_rate=FLAGS.replacing_rate,
+                                                                k=FLAGS.scheduler_linear_k)
 
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            FLAGS.model_name_or_path,
-            config=self.config
-        )
-
-        self.loss = nn.CrossEntropyLoss()
 
     def prepare_data(self): # 数据的预处理转换
         has_cache_files = False
@@ -104,41 +125,9 @@ class NluClassifier(pl.LightningModule):
             torch.save(nlu_train_set, os.path.join(FLAGS.cache_dir, 'train.set'))
             torch.save(nlu_valid_set, os.path.join(FLAGS.cache_dir, 'valid.set'))
 
-    def forward(self, input_ids, attention_mask=None):
-        logits, = self.model(input_ids, attention_mask)
-        return logits
-
-    def predict(self, text):
-        if self.training:
-            self.eval()
-
-        with torch.no_grad():
-            text_to_id, _ = self._convert_text_to_ids(self.tokenizer, text, FLAGS.max_seq_length)
-            input_ids, attention_mask = self._seq_padding(self.tokenizer, text_to_id)
-            outputs = self(input_ids, attention_mask)
-            probs = F.softmax(outputs, dim=-1)
-
-            intent_ranking = [
-                {
-                    "intent": self.id2class[idx], 
-                    "confidence": float(score.item())
-                } for idx, score in enumerate(probs[0])
-            ]
-
-            intent_ranking = sorted(intent_ranking,
-                                    key=lambda s: s['confidence'],
-                                    reverse=True)
-            intent_ranking = intent_ranking[:FLAGS.intent_ranking_length]
-
-            intent = intent_ranking[0]
-
-            predict_result = {
-                "text": text[0],
-                **intent,
-                "intent_ranking": intent_ranking
-            }
-
-        return predict_result
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+        return outputs
 
     @staticmethod
     def _convert_text_to_ids(tokenizer, text, max_len=100):
@@ -173,16 +162,16 @@ class NluClassifier(pl.LightningModule):
         return X, attention_mask    
 
     def training_step(self, batch, batch_idx):
-        logits = self(batch[0], batch[1])
-        loss = self.loss(logits, batch[2]).mean()
+        outputs = self(batch[0], batch[1], batch[2])
+        loss = outputs[0]
 
         return {'loss': loss, 'log': {'train_loss': loss}}
 
     def validation_step(self, batch, batch_idx):
-        logits = self(batch[0], batch[1])
-        loss = self.loss(logits, batch[2]).mean()
-        
-        acc = (logits.argmax(-1) == batch[2]).float()
+        outputs = self(batch[0], batch[1], batch[2])
+        loss = outputs[0]
+        acc = (outputs[1].argmax(-1) == batch[2]).float()
+
         return {'loss': loss, 'acc': acc}
 
     def validation_epoch_end(self, outputs):
@@ -220,6 +209,8 @@ class NluClassifier(pl.LightningModule):
         )
 
     def configure_optimizers(self):
+        # t_total = len(train_dataloader) // FLAGS.gradient_accumulation_steps * FLAGS.epochs
+
         model = self.model
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
@@ -233,7 +224,15 @@ class NluClassifier(pl.LightningModule):
             },
         ]
         optimizer = AdamW(optimizer_grouped_parameters, lr=FLAGS.learning_rate, eps=FLAGS.adam_epsilon)
+        # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=FLAGS.warmup_steps, num_training_steps=t_total)
+
         return optimizer
+    
+    def optimizer_step(self, current_epoch, batch_idx, optimizer, optimizer_idx, second_order_closure=None):
+        if (batch_idx + 1) % FLAGS.gradient_accumulation_steps == 0:
+            optimizer.step()
+            self.replacing_rate_scheduler.step()  # Update replace rate scheduler
+            optimizer.zero_grad()
 
 
 def read_nlu_data():
@@ -274,7 +273,7 @@ def main(argv):
         sh.rm('-r', '-f', FLAGS.output_dir)
         sh.mkdir(FLAGS.output_dir)
 
-        model = NluClassifier(id2class, intent_examples)
+        model = NluTheseusClassifier(id2class, intent_examples)
 
         early_stop_callback = EarlyStopping(
             monitor=FLAGS.monitor,
@@ -289,7 +288,7 @@ def main(argv):
             save_top_k=3,
             monitor=FLAGS.monitor,
             mode=FLAGS.metric_mode,
-            prefix='nlu_'
+            prefix='nlu_theseus_'
         )
 
         trainer = pl.Trainer(
@@ -298,33 +297,13 @@ def main(argv):
             distributed_backend='dp',
             max_epochs=FLAGS.epochs,
             fast_dev_run=FLAGS.debug,
-            logger=pl.loggers.TensorBoardLogger('logs/', name='nlu', version=0),
+            logger=pl.loggers.TensorBoardLogger('logs/', name='nlu_theseus', version=0),
             checkpoint_callback=checkpoint_callback,
             early_stop_callback=early_stop_callback
         )
 
         trainer.fit(model)
 
-    if FLAGS.do_predict:
-        from sanic import Sanic, response
-        server = Sanic()
-
-        checkpoints = list(sorted(glob(os.path.join(FLAGS.output_dir, "*.ckpt"), recursive=True)))
-        model = NluClassifier.load_from_checkpoint(
-            checkpoint_path= checkpoints[-1],
-            id2class= id2class, 
-            intent_examples= intent_examples
-        )
-        model.eval()
-        model.freeze()
-
-        @server.route("/parse", methods=['POST'])
-        async def parse(request):
-            texts = request.json
-            prediction = model.predict(texts)
-            return response.json(prediction)
-
-        server.run(host="0.0.0.0", port=5000, debug=True)
 
 if __name__ == "__main__":
     app.run(main)

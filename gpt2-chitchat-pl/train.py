@@ -11,11 +11,10 @@ import pytorch_lightning as pl
 
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from transformers import GPT2LMHeadModel, BertTokenizer, GPT2Config
-from transformers import AdamW
+from transformers import AdamW, set_seed
 from torch.utils.data import DataLoader, TensorDataset
 from torch.nn import CrossEntropyLoss
 from sklearn.model_selection import train_test_split
-from torchnlp.random import set_seed
 from filelock import FileLock
 from tqdm import tqdm
 

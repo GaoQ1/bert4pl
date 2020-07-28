@@ -13,11 +13,10 @@ import numpy as np
 from seqeval.metrics import f1_score, precision_score, recall_score
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from transformers import AutoConfig, AutoModelForTokenClassification, AutoTokenizer
-from transformers import AdamW
+from transformers import AdamW, set_seed
 from torch.utils.data import DataLoader, TensorDataset
 from rasa.nlu.training_data.loading import load_data
 from sklearn.model_selection import train_test_split
-from torchnlp.random import set_seed
 from filelock import FileLock
 
 
