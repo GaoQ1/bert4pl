@@ -10,7 +10,8 @@ import torch.nn.functional as F
 import pytorch_lightning as pl
 
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
+from model_customize.modeling_bert import BertForLeam
+from transformers import AutoConfig, AutoTokenizer
 from transformers import AdamW, set_seed
 from torch.utils.data import DataLoader, TensorDataset
 from rasa.nlu.training_data.loading import load_data
@@ -62,7 +63,7 @@ class NluClassifier(pl.LightningModule):
             FLAGS.model_name_or_path
         )
 
-        self.model = AutoModelForSequenceClassification.from_pretrained(
+        self.model = BertForLeam.from_pretrained(
             FLAGS.model_name_or_path,
             config=self.config
         )
@@ -102,9 +103,10 @@ class NluClassifier(pl.LightningModule):
             torch.save(nlu_train_set, os.path.join(FLAGS.cache_dir, 'train.set'))
             torch.save(nlu_valid_set, os.path.join(FLAGS.cache_dir, 'valid.set'))
 
-    def forward(self, input_ids, attention_mask=None):
-        logits, = self.model(input_ids, attention_mask)
-        return logits
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        outputs = self.model(input_ids, attention_mask=attention_mask, labels=labels)
+
+        return outputs
 
     def predict(self, text):
         if self.training:
@@ -114,7 +116,7 @@ class NluClassifier(pl.LightningModule):
             text_to_id, _ = self._convert_text_to_ids(self.tokenizer, text, FLAGS.max_seq_length)
             input_ids, attention_mask = self._seq_padding(self.tokenizer, text_to_id)
             outputs = self(input_ids, attention_mask)
-            probs = F.softmax(outputs, dim=-1)
+            probs = F.softmax(outputs[0], dim=-1)
 
             intent_ranking = [
                 {
@@ -171,15 +173,15 @@ class NluClassifier(pl.LightningModule):
         return X, attention_mask    
 
     def training_step(self, batch, batch_idx):
-        logits = self(batch[0], batch[1])
-        loss = self.loss(logits, batch[2]).mean()
+        outputs = self(batch[0], batch[1], batch[2])
+        loss = outputs[0]
 
         return {'loss': loss, 'log': {'train_loss': loss}}
 
     def validation_step(self, batch, batch_idx):
-        logits = self(batch[0], batch[1])
-        loss = self.loss(logits, batch[2]).mean()
-        
+        outputs = self(batch[0], batch[1], batch[2])
+        logits, loss = outputs[0], outputs[1]
+
         acc = (logits.argmax(-1) == batch[2]).float()
         return {'loss': loss, 'acc': acc}
 
@@ -290,7 +292,7 @@ def main(argv):
             save_top_k=3,
             monitor=FLAGS.monitor,
             mode=FLAGS.metric_mode,
-            prefix='nlu_'
+            prefix='nlu_leam_'
         )
 
         trainer = pl.Trainer(
@@ -299,7 +301,7 @@ def main(argv):
             distributed_backend='dp',
             max_epochs=FLAGS.epochs,
             fast_dev_run=FLAGS.debug,
-            logger=pl.loggers.TensorBoardLogger('logs/', name='nlu', version=0),
+            logger=pl.loggers.TensorBoardLogger('logs/', name='nlu_leam', version=0),
             checkpoint_callback=checkpoint_callback,
             early_stop_callback=early_stop_callback
         )
@@ -310,7 +312,7 @@ def main(argv):
         from sanic import Sanic, response
         server = Sanic()
 
-        checkpoints = list(sorted(glob(os.path.join(FLAGS.output_dir, "nlu_*.ckpt"), recursive=True)))
+        checkpoints = list(sorted(glob(os.path.join(FLAGS.output_dir, "nlu_leam_*.ckpt"), recursive=True)))
         model = NluClassifier.load_from_checkpoint(
             checkpoint_path= checkpoints[-1],
             id2class= id2class, 
