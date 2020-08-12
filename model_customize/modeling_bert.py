@@ -17,8 +17,7 @@ class BertForLeam(BertPreTrainedModel):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
-        # self.label_embedding = nn.Embedding(config.num_labels, config.hidden_size)
-        self.label_embedding = nn.Embedding(config.num_labels, 256)
+        self.label_embedding = nn.Embedding(config.num_labels, config.hidden_size)
         self.ul_linear = nn.Linear(config.hidden_size, config.hidden_size)
         self.ul_activation = nn.ReLU()
 
@@ -35,21 +34,13 @@ class BertForLeam(BertPreTrainedModel):
         attention_mask=None,
         token_type_ids=None,
         position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        labels=None,
-        output_attentions=None,
-        output_hidden_states=None,
+        labels=None
     ):
         outputs = self.bert(
             input_ids,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
-            position_ids=position_ids,
-            head_mask=head_mask,
-            inputs_embeds=inputs_embeds,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            position_ids=position_ids
         )
 
         sequence_output, pooled_output = outputs[:2]

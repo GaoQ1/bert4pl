@@ -174,13 +174,13 @@ class NluClassifier(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         outputs = self(batch[0], batch[1], batch[2])
-        loss = outputs[0]
+        loss = outputs[0].mean()
 
         return {'loss': loss, 'log': {'train_loss': loss}}
 
     def validation_step(self, batch, batch_idx):
         outputs = self(batch[0], batch[1], batch[2])
-        logits, loss = outputs[0], outputs[1]
+        logits, loss = outputs[0], outputs[1].mean()
 
         acc = (logits.argmax(-1) == batch[2]).float()
         return {'loss': loss, 'acc': acc}
