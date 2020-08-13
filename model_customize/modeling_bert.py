@@ -17,7 +17,7 @@ class BertForLeam(BertPreTrainedModel):
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
 
-        self.label_embedding = nn.Embedding(config.num_labels, config.hidden_size)
+        self.label_embedding = nn.Embedding(config.num_labels, 128)
         self.ul_linear = nn.Linear(config.hidden_size, config.hidden_size)
         self.ul_activation = nn.ReLU()
 
@@ -48,6 +48,7 @@ class BertForLeam(BertPreTrainedModel):
         if labels is not None:
             loss_fct = CrossEntropyLoss()
             label_embedding = self.label_embedding(labels)
+
             gather = torch.bmm(label_embedding.unsqueeze(2), pooled_output.unsqueeze(1))
 
             label_embedding_l2 = torch.norm(label_embedding, p=2, dim=0) #l2正则
@@ -58,12 +59,14 @@ class BertForLeam(BertPreTrainedModel):
 
             ul = self.ul_activation(self.ul_linear(gather))
             ml = self.kmax_pooling(ul, 1, 1)
+
             beta = nn.Softmax(dim=-1)(ml).squeeze()
 
             pooled_output = self.dropout(beta * pooled_output)
             logits = self.classifier(pooled_output)
 
             loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+
             outputs = (loss, logits, ) + outputs[2:]
         else:
             pooled_output = self.dropout(pooled_output)
