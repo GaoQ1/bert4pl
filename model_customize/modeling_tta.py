@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from transformers.modeling_bert import BertPreTrainedModel, BertPooler, BertIntermediate, BertOutput, BertSelfOutput, BertEmbeddings, BertLayerNorm
+from transformers.modeling_bert import BertPreTrainedModel, BertPooler, BertIntermediate, BertOutput, BertSelfOutput, BertEmbeddings, BertLayerNorm, BertModel
 
 
 class PositionEmbeddings(nn.Module):
@@ -36,6 +36,7 @@ class PositionEmbeddings(nn.Module):
         embeddings = self.LayerNorm(embeddings)
         embeddings = self.dropout(embeddings)
         return embeddings
+
 
 class BertSelfAttention(nn.Module):
     def __init__(self, config):
@@ -80,7 +81,7 @@ class BertSelfAttention(nn.Module):
         if attention_mask is not None:
             attention_scores = attention_scores + attention_mask
         
-        diag_mask = torch.eye(attention_scores.size(-1)).expand_as(attention_scores)
+        diag_mask = torch.eye(attention_scores.size(-1), device=input_tensor.device).expand_as(attention_scores)
         attention_scores = attention_scores * (1.0 - diag_mask)
 
         attention_probs = nn.Softmax(dim=-1)(attention_scores)
@@ -221,6 +222,49 @@ class TtaModel(BertPreTrainedModel):
         return encoded_layers, pooled_output
 
 
+class TtaLMHeadModel(BertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+
+        self.bert = TtaModel(config)
+        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+
+        self.init_weights()
+
+    def forward(
+        self,
+        input_ids=None,
+        token_type_ids=None,
+        attention_mask=None,
+        position_ids=None,
+        labels=None,
+        output_all_encoded_layers=True
+    ):
+        transformer_outputs = self.bert(
+            input_ids,
+            token_type_ids=token_type_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            output_all_encoded_layers=output_all_encoded_layers
+        )
+
+        hidden_states = transformer_outputs[0]
+
+        lm_logits = self.lm_head(hidden_states)
+
+        outputs = (lm_logits,) + transformer_outputs[1:]
+        if labels is not None:
+            # Shift so that tokens < n predict n
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            outputs = (loss,) + outputs
+
+        return outputs  # (loss), lm_logits, presents, (all hidden_states), (attentions)
+
+
 class BertForTtaNlu(BertPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
@@ -239,12 +283,14 @@ class BertForTtaNlu(BertPreTrainedModel):
         attention_mask=None,
         position_ids=None,
         labels=None,
+        output_all_encoded_layers=True
     ):
         outputs = self.bert(
             input_ids,
             token_type_ids=token_type_ids,
             attention_mask=attention_mask,
-            position_ids=position_ids
+            position_ids=position_ids,
+            output_all_encoded_layers=output_all_encoded_layers
         )
 
         pooled_output = outputs[1]
