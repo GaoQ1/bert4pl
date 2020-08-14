@@ -11,7 +11,7 @@ import pytorch_lightning as pl
 
 from torch.nn import CrossEntropyLoss
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from model_customize.modeling_tta import TtaLMHeadModel
+from modeling_tta import TtaLMHeadModel
 from transformers import AutoConfig, AutoTokenizer
 from transformers import AdamW, set_seed
 from torch.utils.data import DataLoader, TensorDataset

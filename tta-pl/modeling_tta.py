@@ -204,12 +204,13 @@ class TtaModel(BertPreTrainedModel):
             position_ids
         )
 
-        extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_ids.size(), input_ids.device)
-
+        if attention_mask is not None:
+            attention_mask = self.get_extended_attention_mask(attention_mask, input_ids.size(), input_ids.device)
+        
         encoded_layers = self.encoder(
             position_embedding,
             embedding_output,
-            attention_mask=extended_attention_mask,
+            attention_mask=attention_mask,
             output_all_encoded_layers=output_all_encoded_layers
         )
 
