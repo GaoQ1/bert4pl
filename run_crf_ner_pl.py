@@ -448,8 +448,8 @@ def main(argv):
         trainer = pl.Trainer(
             default_root_dir='logs',
             gpus=(FLAGS.gpus if torch.cuda.is_available() else 0),
-            distributed_backend='dp',
-            precision=32,
+            distributed_backend='ddp',
+            precision=16,
             max_epochs=FLAGS.epochs,
             fast_dev_run=FLAGS.debug,
             logger=pl.loggers.TensorBoardLogger('logs/', name='ner', version=0),
