@@ -13,7 +13,7 @@ import numpy as np
 from seqeval.metrics import f1_score, precision_score, recall_score
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from transformers import AutoConfig, AutoTokenizer
-from model_customize.modeling_bert import BertCrfForNer
+from model_customize.modeling_bert import BertCrfForNlu
 from transformers import AdamW, set_seed, get_linear_schedule_with_warmup
 from torch.utils.data import DataLoader, TensorDataset
 from rasa.nlu.training_data.loading import load_data
@@ -57,38 +57,48 @@ FLAGS = flags.FLAGS
 sh.rm('-r', '-f', 'logs')
 sh.mkdir('logs')
 
-class NerClassifier(pl.LightningModule):
+class NluClassifier(pl.LightningModule):
     def __init__(self):
         super().__init__()
-        self.id2entity, self.entity_examples = self._read_nlu_data()
+        self.id2entity, self.entity_examples, self.id2class, self.intent_examples = self._read_nlu_data()
 
         self.entity2id = {j: i for i, j in self.id2entity.items()}
+        self.class2id = {j: i for i, j in self.id2class.items()}
 
         self.config = AutoConfig.from_pretrained(
-            FLAGS.model_name_or_path,
-            num_labels=len(self.id2entity)
+            FLAGS.model_name_or_path
         )
+
+        self.config.update({
+            "entity_labels": len(self.id2entity),
+            "class_labels": len(self.id2class)
+        })
 
         self.tokenizer = AutoTokenizer.from_pretrained(
             FLAGS.model_name_or_path
         )
 
-        self.model = BertCrfForNer.from_pretrained(
+        self.model = BertCrfForNlu.from_pretrained(
             FLAGS.model_name_or_path,
             config=self.config
         )
 
-        self.loss = nn.CrossEntropyLoss()
 
     def _read_nlu_data(self):
         try:
             cache_dir = sh.ls(FLAGS.cache_dir)
-            if 'id2entity.set' in cache_dir and 'entity_examples.set' in cache_dir:
+            if 'id2entity.set' in cache_dir and 'entity_examples.set' in cache_dir and 'id2class.set' in cache_dir and 'intent_examples.set' in cache_dir:
                 id2entity_path = os.path.join(FLAGS.cache_dir, 'id2entity.set')
                 id2entity_lock_path = id2entity_path + '.lock'
 
                 entity_examples_path = os.path.join(FLAGS.cache_dir, 'entity_examples.set')
                 entity_examples_lock_path = entity_examples_path + '.lock'
+
+                id2class_path = os.path.join(FLAGS.cache_dir, 'id2class.set')
+                id2class_lock_path = id2class_path + '.lock'
+
+                intent_examples_path = os.path.join(FLAGS.cache_dir, 'intent_examples.set')
+                intent_examples_lock_path = intent_examples_path + '.lock'
                 
                 with FileLock(id2entity_lock_path):
                     id2entity = torch.load(id2entity_path)
@@ -96,28 +106,41 @@ class NerClassifier(pl.LightningModule):
                 with FileLock(entity_examples_lock_path):
                     entity_examples = torch.load(entity_examples_path)
 
-                return id2entity, entity_examples
+                with FileLock(id2class_lock_path):
+                    id2class = torch.load(id2class_path)
+
+                with FileLock(intent_examples_lock_path):
+                    intent_examples = torch.load(intent_examples_path)
+                
+                return id2entity, entity_examples, id2class, intent_examples
         except Exception as e:
             logging.error(e)
             sh.mkdir(FLAGS.cache_dir)
         
         data = load_data(FLAGS.data_dir, 'zh')
-        entities, entity_examples = data.entities, data.entity_examples
-        entity_lists, entity_examples_cooked = ['O'], []
+        entity_lists, entity_examples_cooked, intent_examples = ['O'], [], []
 
-        for example in entity_examples:
-            entity_examples_cooked.append(self._predata(example.text, example.get("entities", [])))
+        for item in data.training_examples:
+            training_text = item.text
+            training_data = item.data
 
-        for entity in entities:
+            entity_examples_cooked.append(self._predata(training_text, training_data.get("entities", [])))
+            intent_examples.append(training_data.get("intent", None))
+
+        for entity in data.entities:
             for tag in ['B', 'I']:
                 entity_lists.append(tag + '-' + entity)
 
         id2entity = dict(enumerate(entity_lists))
+        id2class = dict(enumerate(data.intents))
 
         torch.save(id2entity, os.path.join(FLAGS.cache_dir, 'id2entity.set'))
         torch.save(entity_examples_cooked, os.path.join(FLAGS.cache_dir, 'entity_examples.set'))
 
-        return id2entity, entity_examples_cooked
+        torch.save(id2class, os.path.join(FLAGS.cache_dir, 'id2class.set'))
+        torch.save(intent_examples, os.path.join(FLAGS.cache_dir, 'intent_examples.set'))
+
+        return id2entity, entity_examples_cooked, id2class, intent_examples
 
     @staticmethod
     def _predata(text, entity_offsets):
@@ -157,26 +180,33 @@ class NerClassifier(pl.LightningModule):
             sh.mkdir(FLAGS.cache_dir)
 
         if not has_cache_files:
-            X, Y = [], []
+            entity_X, entity_Y, intent_Y = [], [], []
 
             for entity_example in self.entity_examples:
                 item_x, item_y = [], []
                 for item in entity_example:
                     item_x.append(item[0])
                     item_y.append(self.entity2id[item[1]])
-                X.append(item_x)
-                Y.append(item_y)
+                entity_X.append(item_x)
+                entity_Y.append(item_y)
 
-            train_x, valid_x, train_y, valid_y = train_test_split(X, Y, test_size=FLAGS.test_size, random_state=0)
+            for msg in self.intent_examples:
+                intent_Y.append(self.class2id[msg])
+
+            train_x, valid_x, train_entity_y, valid_entity_y = train_test_split(entity_X, entity_Y, test_size=FLAGS.test_size, random_state=0)
+            train_intent_y, valid_intent_y = train_test_split(intent_Y, test_size=FLAGS.test_size, random_state=0)
 
             train_input_ids = self._convert_text_to_ids(self.tokenizer, train_x)
             valid_input_ids = self._convert_text_to_ids(self.tokenizer, valid_x)
 
-            train_input_ids, train_labels, train_attention_masks = self._convert_example_to_features(self.tokenizer, train_input_ids, train_y, FLAGS.max_seq_length, FLAGS.pad_token_label_id)
-            valid_input_ids, valid_labels, valid_attention_masks = self._convert_example_to_features(self.tokenizer, valid_input_ids, valid_y, FLAGS.max_seq_length, FLAGS.pad_token_label_id)
+            train_input_ids, train_entity_labels, train_attention_masks = self._convert_example_to_features(self.tokenizer, train_input_ids, train_entity_y, FLAGS.max_seq_length, FLAGS.pad_token_label_id)
+            valid_input_ids, valid_entity_labels, valid_attention_masks = self._convert_example_to_features(self.tokenizer, valid_input_ids, valid_entity_y, FLAGS.max_seq_length, FLAGS.pad_token_label_id)
 
-            nlu_train_set = TensorDataset(train_input_ids, train_attention_masks, train_labels)
-            nlu_valid_set = TensorDataset(valid_input_ids, valid_attention_masks, valid_labels)
+            train_intent_labels = torch.tensor(train_intent_y, dtype=torch.long)
+            valid_intent_labels = torch.tensor(valid_intent_y, dtype=torch.long)
+
+            nlu_train_set = TensorDataset(train_input_ids, train_attention_masks, train_intent_labels, train_entity_labels)
+            nlu_valid_set = TensorDataset(valid_input_ids, valid_attention_masks, valid_intent_labels, valid_entity_labels)
 
             torch.save(nlu_train_set, os.path.join(FLAGS.cache_dir, 'train.set'))
             torch.save(nlu_valid_set, os.path.join(FLAGS.cache_dir, 'valid.set'))
@@ -184,7 +214,6 @@ class NerClassifier(pl.LightningModule):
     def forward(self, **inputs):
         return self.model(**inputs)
 
-    
     def predict(self, text):
         if self.training:
             self.eval()
@@ -201,17 +230,37 @@ class NerClassifier(pl.LightningModule):
             inputs = {"input_ids": input_ids, "attention_mask": attention_masks}
             outputs = self(**inputs)
 
-            tags = self.model.crf.decode(outputs[0], inputs['attention_mask'])
+            ## get entity
+            tags = self.model.crf.decode(outputs[1], inputs['attention_mask'])
             tags  = tags.squeeze(0).cpu().numpy().tolist()
+            pred_lists = self._predict_outputs(np.array(tags))
+            entity_result = []
+            for t, tags in zip(text, pred_lists):
+                entity_result.append(self._result_to_json(t, tags[1: len(t) + 1]))
 
-        pred_lists = self._predict_outputs(np.array(tags))
-        result = []
+            ## get intent
+            probs = F.softmax(outputs[0], dim=-1)
+            intent_ranking = [
+                {
+                    "intent": self.id2class[idx], 
+                    "confidence": float(score.item())
+                } for idx, score in enumerate(probs[0])
+            ]
+            intent_ranking = sorted(intent_ranking,
+                                    key=lambda s: s['confidence'],
+                                    reverse=True)
+            intent_ranking = intent_ranking[:FLAGS.intent_ranking_length]
+            intent = intent_ranking[0]
 
-        for t, tags in zip(text, pred_lists):
-            result.append(self._result_to_json(t, tags[1: len(t) + 1]))
-        
-        return result
+            ## 合并intent和entity结果
+            predict_result = {
+                "text": text[0],
+                **intent,
+                "intent_ranking": intent_ranking,
+                "entities": entity_result[0]
+            }
 
+        return predict_result
 
     def _predict_outputs(self, preds):
         preds_list = [[] for _ in range(preds.shape[0])]
@@ -220,20 +269,16 @@ class NerClassifier(pl.LightningModule):
                 preds_list[i].append(self.id2entity[preds[i][j].item()])
         return preds_list
 
-
     @staticmethod
     def _result_to_json(string, tags):
-        item = {
-            "string": string,
-            "entities": []
-        }
+        entities = []
         entity_name = ""
         entity_start = 0
         idx = 0
 
         for char, tag in zip(string, tags):
             if tag[0] == "S":
-                item["entities"].append(
+                entities.append(
                     {"value": char, "start": idx, "end": idx+1, "entity": tag[2:]})
             elif tag[0] == "B":
                 entity_name += char
@@ -242,7 +287,7 @@ class NerClassifier(pl.LightningModule):
                 entity_name += char
             elif tag[0] == "E":
                 entity_name += char
-                item["entities"].append(
+                entities.append(
                     {"value": entity_name,
                     "start": entity_start,
                     "end": idx + 1,
@@ -252,7 +297,7 @@ class NerClassifier(pl.LightningModule):
                 entity_name = ""
                 entity_start = idx
             idx += 1
-        return item 
+        return entities 
 
     @staticmethod
     def _convert_text_to_ids(tokenizer, text):
@@ -307,48 +352,53 @@ class NerClassifier(pl.LightningModule):
         return x_features, y_features, attention_masks
     
     def training_step(self, batch, batch_idx):
-        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[2]}
+        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "intent_labels": batch[2], "entity_labels": batch[3]}
         outputs = self(**inputs)
         loss = outputs[0]
 
         return {'loss': loss, 'log': {'train_loss': loss}}
 
     def validation_step(self, batch, batch_idx):
-        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "labels": batch[2]}
+        inputs = {"input_ids": batch[0], "attention_mask": batch[1], "intent_labels": batch[2], "entity_labels": batch[3]}
         outputs = self(**inputs)
-        loss, logits = outputs[:2]
+        loss, intent_logits, entity_logits = outputs[:3]
 
-        preds = logits.detach().cpu().numpy()
-        out_label_ids = inputs["labels"].detach().cpu().numpy()
+        entity_preds = entity_logits.detach().cpu().numpy()
+        out_label_ids = inputs["entity_labels"].detach().cpu().numpy()
 
-        return {'val_loss': loss.detach().cpu(), "pred": preds, "target": out_label_ids}
+        intent_acc = (intent_logits.argmax(-1) == inputs["intent_labels"]).float()
+
+        return {'val_loss': loss.detach().cpu(), "entity_preds": entity_preds, "entity_targets": out_label_ids, "intent_acc": intent_acc}
 
     def _eval_end(self, outputs):
         "Evaluation called for both Val and Test"
         val_loss_mean = torch.stack([x["val_loss"] for x in outputs]).mean()
-        preds = np.concatenate([x["pred"] for x in outputs], axis=0)
-        preds = np.argmax(preds, axis=2)
-        out_label_ids = np.concatenate([x["target"] for x in outputs], axis=0)
+        entity_preds = np.concatenate([x["entity_preds"] for x in outputs], axis=0)
+        entity_preds = np.argmax(entity_preds, axis=2)
+        intent_acc = torch.stack([x["intent_acc"] for x in outputs]).mean()
+        
+        out_label_ids = np.concatenate([x["entity_targets"] for x in outputs], axis=0)
 
         out_label_list = [[] for _ in range(out_label_ids.shape[0])]
-        preds_list = [[] for _ in range(out_label_ids.shape[0])]
+        entity_preds_list = [[] for _ in range(out_label_ids.shape[0])]
 
         for i in range(out_label_ids.shape[0]):
             for j in range(out_label_ids.shape[1]):
                 if out_label_ids[i, j] != FLAGS.pad_token_label_id:
                     out_label_list[i].append(self.id2entity[out_label_ids[i][j]])
-                    preds_list[i].append(self.id2entity[preds[i][j]])
+                    entity_preds_list[i].append(self.id2entity[entity_preds[i][j]])
 
         results = {
             "val_loss": val_loss_mean,
-            "precision": precision_score(out_label_list, preds_list),
-            "recall": recall_score(out_label_list, preds_list),
-            "f1": f1_score(out_label_list, preds_list),
+            "precision": precision_score(out_label_list, entity_preds_list),
+            "recall": recall_score(out_label_list, entity_preds_list),
+            "f1": f1_score(out_label_list, entity_preds_list),
+            "intent_acc": intent_acc
         }
 
         ret = {k: v for k, v in results.items()}
         ret["log"] = results
-        return ret, preds_list, out_label_list
+        return ret, entity_preds_list, out_label_list
 
     def validation_epoch_end(self, outputs):
         ret, preds, targets = self._eval_end(outputs)
@@ -400,7 +450,9 @@ class NerClassifier(pl.LightningModule):
 
         bert_param_optimizer = list(model.bert.named_parameters())
         crf_param_optimizer = list(model.crf.named_parameters())
-        linear_param_optimizer = list(model.classifier.named_parameters())
+        
+        intent_classifier_param_optimizer = list(model.intent_classifier.named_parameters())
+        entity_classifier_param_optimizer = list(model.entity_classifier.named_parameters())
 
         no_decay = ["bias", "LayerNorm.weight"]
         
@@ -410,14 +462,19 @@ class NerClassifier(pl.LightningModule):
             {'params': [p for n, p in bert_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
             'lr': FLAGS.learning_rate},
 
+            {'params': [p for n, p in intent_classifier_param_optimizer if not any(nd in n for nd in no_decay)],
+            'weight_decay': FLAGS.weight_decay, 'lr': FLAGS.learning_rate},
+            {'params': [p for n, p in intent_classifier_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            'lr': FLAGS.learning_rate},
+
             {'params': [p for n, p in crf_param_optimizer if not any(nd in n for nd in no_decay)],
             'weight_decay': FLAGS.weight_decay, 'lr': FLAGS.crf_learning_rate},
             {'params': [p for n, p in crf_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
             'lr': FLAGS.crf_learning_rate},
 
-            {'params': [p for n, p in linear_param_optimizer if not any(nd in n for nd in no_decay)],
+            {'params': [p for n, p in entity_classifier_param_optimizer if not any(nd in n for nd in no_decay)],
             'weight_decay': FLAGS.weight_decay, 'lr': FLAGS.crf_learning_rate},
-            {'params': [p for n, p in linear_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
+            {'params': [p for n, p in entity_classifier_param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0,
             'lr': FLAGS.crf_learning_rate}
         ]
         optimizer = AdamW(optimizer_grouped_parameters, lr=FLAGS.learning_rate, eps=FLAGS.adam_epsilon)
@@ -432,7 +489,7 @@ def main(argv):
         sh.rm('-r', '-f', FLAGS.output_dir)
         sh.mkdir(FLAGS.output_dir)
 
-        model = NerClassifier()
+        model = NluClassifier()
 
         early_stop_callback = EarlyStopping(
             monitor=FLAGS.monitor,
@@ -447,7 +504,7 @@ def main(argv):
             save_top_k=3,
             monitor=FLAGS.monitor,
             mode=FLAGS.metric_mode,
-            prefix='ner_'
+            prefix='nlu_'
         )
 
         trainer = pl.Trainer(
@@ -457,7 +514,7 @@ def main(argv):
             precision=32,
             max_epochs=FLAGS.epochs,
             fast_dev_run=FLAGS.debug,
-            logger=pl.loggers.TensorBoardLogger('logs/', name='ner', version=0),
+            logger=pl.loggers.TensorBoardLogger('logs/', name='nlu', version=0),
             checkpoint_callback=checkpoint_callback,
             early_stop_callback=early_stop_callback
         )
@@ -466,7 +523,7 @@ def main(argv):
 
     if FLAGS.do_predict:
         checkpoints = list(sorted(glob(os.path.join(FLAGS.output_dir, "*.ckpt"), recursive=True)))
-        model = NerClassifier.load_from_checkpoint(
+        model = NluClassifier.load_from_checkpoint(
             checkpoint_path= checkpoints[-1]
         )
         model.eval()
@@ -475,7 +532,7 @@ def main(argv):
         while True:
             text = input("输入：")
             prediction = model.predict([text])
-            print("ner的结果是：", prediction)
+            print("nlu的结果是：", prediction)
 
 if __name__ == "__main__":
     app.run(main)

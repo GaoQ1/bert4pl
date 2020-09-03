@@ -91,15 +91,17 @@ class BertCrfForNer(BertPreTrainedModel):
         self.crf = CRF(num_tags=config.num_labels, batch_first=True)
         self.init_weights()
 
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None, input_lens=None):
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
         sequence_output = outputs[0]
         sequence_output = self.dropout(sequence_output)
         logits = self.classifier(sequence_output)
         outputs = (logits,)
+        
         if labels is not None:
             loss = self.crf(emissions=logits, tags=labels, mask=attention_mask)
             outputs = (-1 * loss,) + outputs
+        
         return outputs # (loss), scores
 
 class BertSoftmaxForNer(BertPreTrainedModel):
@@ -197,3 +199,43 @@ class BertSpanForNer(BertPreTrainedModel):
             total_loss = (start_loss + end_loss) / 2
             outputs = (total_loss,) + outputs
         return outputs
+
+
+class BertCrfForNlu(BertPreTrainedModel):
+    def __init__(self, config):
+        super().__init__(config)
+        
+        self.bert = BertModel(config)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        self.class_labels = config.class_labels
+        self.entity_labels = config.entity_labels
+
+        self.intent_classifier = nn.Linear(config.hidden_size, self.class_labels)
+        self.entity_classifier = nn.Linear(config.hidden_size, self.entity_labels)
+
+        self.crf = CRF(num_tags=config.entity_labels, batch_first=True)
+        self.init_weights()
+
+    def forward(self, input_ids, token_type_ids=None, attention_mask=None, intent_labels=None, entity_labels=None):
+        outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask, token_type_ids=token_type_ids)
+        
+        pooled_output = outputs[1]
+        pooled_output = self.dropout(pooled_output)
+        intent_logits = self.intent_classifier(pooled_output)
+
+        sequence_output = outputs[0]
+        sequence_output = self.dropout(sequence_output)
+        entity_logits = self.entity_classifier(sequence_output)
+
+        outputs = (intent_logits, entity_logits)
+        
+        if intent_labels is not None and entity_labels is not None:
+            intent_loss_fct = CrossEntropyLoss()
+            intent_loss = intent_loss_fct(intent_logits.view(-1, self.class_labels), intent_labels.view(-1))
+
+            entity_loss = self.crf(emissions=entity_logits, tags=entity_labels, mask=attention_mask)
+
+            outputs = (-1 * entity_loss + intent_loss, ) + outputs
+        
+        return outputs # (loss), scores
